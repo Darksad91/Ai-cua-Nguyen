@@ -1,36 +1,65 @@
 import streamlit as st
-from langchain_openai import ChatOpenAI
+from PyPDF2 import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains.question_answering import load_qa_chain
 
-# 1. Cấu hình trang web
-st.set_page_config(page_title="AI Của Tôi", page_icon="🤖")
-st.title("Chat với AI Riêng")
+# --- CẤU HÌNH ---
+st.set_page_config(page_title="AI Đọc Tài Liệu (Gemini)", page_icon="🤖")
+st.header("🤖 Chat với tài liệu (Dùng Gemini Free)")
 
-# 2. Nhập khóa bí mật (API Key)
-openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+# --- SIDEBAR ---
+with st.sidebar:
+    st.title("Cài đặt")
+    google_api_key = st.text_input("Nhập Google Gemini API Key:", type="password")
+    uploaded_file = st.file_uploader("Tải lên file PDF", type="pdf")
+    process_button = st.button("Xử lý dữ liệu")
 
-# 3. Khởi tạo lịch sử chat
-if "messages" not in st.session_state:
-    st.session_state["messages"] = [{"role": "assistant", "content": "Chào bạn, tôi có thể giúp gì?"}]
+# --- HÀM CHÍNH ---
+def main():
+    if uploaded_file and process_button:
+        if not google_api_key:
+            st.error("⚠️ Chưa nhập API Key.")
+            return
 
-# 4. Hiển thị tin nhắn cũ
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
+        with st.spinner("Đang đọc tài liệu..."):
+            # 1. Đọc PDF
+            pdf_reader = PdfReader(uploaded_file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text()
+            
+            # 2. Cắt nhỏ văn bản
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200
+            )
+            chunks = text_splitter.split_text(text)
 
-# 5. Xử lý khi người dùng nhập liệu
-if prompt := st.chat_input():
-    if not openai_api_key:
-        st.info("Vui lòng nhập API Key để bắt đầu.")
-        st.stop()
+            # 3. Tạo Vector (Dùng Google Embeddings)
+            embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=google_api_key)
+            vector_store = FAISS.from_texts(chunks, embedding=embeddings)
+            st.session_state.vector_store = vector_store
+            st.success("✅ Xong! Hãy hỏi đi.")
 
-    # Lưu tin nhắn người dùng
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.chat_message("user").write(prompt)
+    # --- CHAT ---
+    query = st.text_input("Câu hỏi của bạn:")
+    if query:
+        if "vector_store" not in st.session_state:
+            st.warning("⚠️ Hãy upload file trước.")
+        elif not google_api_key:
+            st.warning("⚠️ Thiếu API Key.")
+        else:
+            # 4. Tìm kiếm & Trả lời (Dùng Gemini Pro)
+            docs = st.session_state.vector_store.similarity_search(query)
+            llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=google_api_key)
+            chain = load_qa_chain(llm, chain_type="stuff")
+            
+            with st.spinner("Gemini đang nghĩ..."):
+                response = chain.run(input_documents=docs, question=query)
+                st.write(response)
 
-    # Gọi AI trả lời (Sử dụng Model)
-    llm = ChatOpenAI(model_name="gpt-3.5-turbo", openai_api_key=openai_api_key)
-    response = llm.invoke(prompt)
-    msg_content = response.content
-
-    # Lưu và hiện câu trả lời
-    st.session_state.messages.append({"role": "assistant", "content": msg_content})
-    st.chat_message("assistant").write(msg_content)
+if __name__ == '__main__':
+    main()
